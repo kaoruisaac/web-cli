@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const CHROME_NATIVE_HOST_NAME: &str = "com.example.webcli";
-const CHROME_EXTENSION_ID: &str = "oafgamkcidgbmlcocfnmjajpegchbpgh";
+const CHROME_EXTENSION_ID: &str = "mifjcaefhmigmhmejhficbnhgnecfibk";
 const MANIFEST_FILE_NAME: &str = "com.example.webcli.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

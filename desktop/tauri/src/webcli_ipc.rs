@@ -11,11 +11,16 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub const CORE_IPC_PROTOCOL: &str = "webcli-core-ipc-v1";
 pub const CORE_IPC_HOST: &str = "127.0.0.1";
@@ -758,6 +763,8 @@ fn build_provider_process_command(
     for (key, value) in &spec.env {
         command.env(key, value);
     }
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
     command
 }
 
