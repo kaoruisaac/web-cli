@@ -2041,26 +2041,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "native-counter-desktop"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dirs",
- "encoding_rs",
- "jsonschema",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tempfile",
- "url",
- "windows-sys 0.61.2",
- "winreg 0.52.0",
-]
-
-[[package]]
 name = "ndk"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4547,6 +4527,26 @@ dependencies = [
  "phf_codegen",
  "string_cache",
  "string_cache_codegen",
+]
+
+[[package]]
+name = "webcli-app"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs",
+ "encoding_rs",
+ "jsonschema",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "url",
+ "windows-sys 0.61.2",
+ "winreg 0.52.0",
 ]
 
 [[package]]

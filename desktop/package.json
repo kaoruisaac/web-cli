@@ -1,5 +1,5 @@
 {
-  "name": "native-counter-desktop",
+  "name": "webcli-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",

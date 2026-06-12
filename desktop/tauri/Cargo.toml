@@ -1,5 +1,5 @@
 [package]
-name = "native-counter-desktop"
+name = "webcli-app"
 version = "0.1.0"
 description = "WebCli"
 authors = ["Isaac Lin"]
@@ -8,7 +8,7 @@ default-run = "webcli-app"
 autobins = false
 
 [lib]
-name = "native_counter_desktop"
+name = "webcli_lib"
 path = "src/lib.rs"
 
 [[bin]]

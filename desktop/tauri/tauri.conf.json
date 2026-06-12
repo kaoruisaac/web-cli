@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "WebCLI",
+  "productName": "WebCli",
   "mainBinaryName": "webcli-app",
   "version": "0.1.0",
   "identifier": "com.example.webcli",

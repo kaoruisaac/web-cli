@@ -1,3 +1,3 @@
 fn main() {
-    native_counter_desktop::webcli_tool::run();
+    webcli_lib::webcli_tool::run();
 }
