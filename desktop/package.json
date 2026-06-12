@@ -1,0 +1,25 @@
+{
+  "name": "native-counter-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "pretauri": "cd tauri && cargo build --bin webcli-tool && cargo build --bin webcli-native-host",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "solid-js": "latest"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "typescript": "latest",
+    "vite": "latest",
+    "vite-plugin-solid": "latest"
+  },
+  "volta": {
+    "node": "24.13.0"
+  }
+}
