@@ -29,8 +29,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ inputs.tag_name || github.ref_name }}
         run: |
-          gh release view "$TAG_NAME" >/dev/null 2>&1 || \
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
           gh release create "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             --draft \
             --title "WebCLI $TAG_NAME" \
             --notes "Release bundle for WebCLI $TAG_NAME"
