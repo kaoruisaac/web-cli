@@ -1,4 +1,3 @@
-pub mod counter_demo;
 pub mod webcli_app;
 pub mod webcli_core;
 pub mod webcli_ipc;
