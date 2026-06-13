@@ -19,7 +19,10 @@ fn load_dev_chrome_extension_id() {
         return;
     };
 
-    let env_path = PathBuf::from(manifest_dir).join("..").join(".env.local");
+    let env_path = PathBuf::from(manifest_dir)
+        .join("..")
+        .join("..")
+        .join(".env.local");
     println!("cargo:rerun-if-changed={}", env_path.display());
 
     if let Ok(value) = env::var(DEV_CHROME_EXTENSION_ID_ENV) {

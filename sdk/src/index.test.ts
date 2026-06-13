@@ -1,42 +1,75 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WEBCLI_EXTENSION_ID } from "./extension-id";
 import { Webcli } from "./index";
 
 type Listener<T> = (value: T) => void;
 
 class MockWindow {
-  sent: Array<{ message: any; targetOrigin: string }> = [];
-  listeners: Listener<MessageEvent>[] = [];
+  location = { origin: "https://app.example.test" };
+  port = new MockRuntimePort();
+  connectCalls: Array<{ extensionId: string; connectInfo: { name: string } }> = [];
 
-  postMessage(message: any, targetOrigin: string): void {
-    this.sent.push({ message, targetOrigin });
+  postMessage(_message: any, _targetOrigin: string): void {
+    throw new Error("window.postMessage should not be used by the SDK transport");
   }
 
-  addEventListener(type: string, listener: Listener<MessageEvent>): void {
-    if (type === "message") {
-      this.listeners.push(listener);
-    }
+  addEventListener(_type: string, _listener: Listener<MessageEvent>): void {
+    throw new Error("window.addEventListener should not be used by the SDK transport");
   }
 
   emitFromExtension(message: any): void {
-    for (const listener of this.listeners) {
-      listener({ source: this, data: message } as unknown as MessageEvent);
-    }
+    this.port.emit(message);
   }
 
-  emitFromOtherSource(message: any): void {
-    for (const listener of this.listeners) {
-      listener({ source: {}, data: message } as unknown as MessageEvent);
-    }
+  emitFromOtherSource(_message: any): void {
+    // External runtime messaging does not expose arbitrary page message sources.
   }
 
   lastSent(): any {
-    return this.sent.at(-1)?.message;
+    return this.port.sent.at(-1);
+  }
+}
+
+class MockRuntimePort {
+  sent: any[] = [];
+  messageListeners: Array<(message: any) => void> = [];
+  disconnectListeners: Array<() => void> = [];
+  onMessage = {
+    addListener: (listener: (message: any) => void) => this.messageListeners.push(listener),
+  };
+  onDisconnect = {
+    addListener: (listener: () => void) => this.disconnectListeners.push(listener),
+  };
+
+  postMessage(message: any): void {
+    this.sent.push(message);
+  }
+
+  emit(message: any): void {
+    for (const listener of this.messageListeners) {
+      listener(message);
+    }
+  }
+
+  disconnect(): void {
+    for (const listener of this.disconnectListeners) {
+      listener();
+    }
   }
 }
 
 function installWindowMock() {
   const pageWindow = new MockWindow();
   (globalThis as any).window = pageWindow;
+  (globalThis as any).chrome = {
+    runtime: {
+      lastError: null,
+      connect: (extensionId: string, connectInfo: { name: string }) => {
+        pageWindow.connectCalls.push({ extensionId, connectInfo });
+        return pageWindow.port;
+      },
+    },
+  };
   return pageWindow;
 }
 
@@ -111,9 +144,14 @@ describe("Webcli SDK", () => {
 
   afterEach(() => {
     delete (globalThis as any).window;
+    delete (globalThis as any).chrome;
   });
 
-  it("posts page bridge messages and creates a session", async () => {
+  it("uses the production extension id by default", () => {
+    expect(WEBCLI_EXTENSION_ID).toBe("ogccgaminlphbkeghldidiiimajfdpag");
+  });
+
+  it("posts runtime messages and creates a session", async () => {
     const webcli = new Webcli();
     const promise = webcli.createSession({
       provider: "codex",
@@ -123,7 +161,6 @@ describe("Webcli SDK", () => {
     const request = pageWindow.lastSent();
 
     expect(request).toMatchObject({
-      source: "webcli-sdk-page",
       type: "create_session",
       input: {
         provider: "codex",
@@ -133,6 +170,12 @@ describe("Webcli SDK", () => {
     });
     expect(request.channelId).toMatch(/^webcli_/);
     expect(request.requestId).toMatch(/^sdk_/);
+    expect(pageWindow.connectCalls).toEqual([
+      {
+        extensionId: "ogccgaminlphbkeghldidiiimajfdpag",
+        connectInfo: { name: "webcli-sdk-external" },
+      },
+    ]);
 
     respondOk(pageWindow, request, { sessionId: "thread_1" });
     const session = await promise;
@@ -140,6 +183,38 @@ describe("Webcli SDK", () => {
     expect(session.sessionId).toBe("thread_1");
     expect(session.provider).toBe("codex");
     expect(session.model).toBe("gpt-5");
+  });
+
+  it("gets approval status from the extension without creating a session", async () => {
+    const webcli = new Webcli();
+    const promise = webcli.getApprovalStatus();
+    const request = pageWindow.lastSent();
+
+    expect(request).toMatchObject({
+      type: "get_approval_status",
+    });
+
+    respondOk(pageWindow, request, {
+      installed: true,
+      approved: true,
+      origin: "https://app.example.test",
+    });
+    await expect(promise).resolves.toEqual({
+      installed: true,
+      approved: true,
+      origin: "https://app.example.test",
+    });
+  });
+
+  it("returns unavailable approval status when the extension cannot connect", async () => {
+    delete (globalThis as any).chrome;
+    const webcli = new Webcli();
+
+    await expect(webcli.getApprovalStatus()).resolves.toEqual({
+      installed: false,
+      approved: false,
+      origin: "https://app.example.test",
+    });
   });
 
   it("creates an opencode session and lists providers", async () => {
@@ -151,7 +226,6 @@ describe("Webcli SDK", () => {
     const createRequest = pageWindow.lastSent();
 
     expect(createRequest).toMatchObject({
-      source: "webcli-sdk-page",
       type: "create_session",
       input: {
         provider: "opencode",
@@ -168,7 +242,6 @@ describe("Webcli SDK", () => {
     const listPromise = webcli.listProviders();
     const listRequest = pageWindow.lastSent();
     expect(listRequest).toMatchObject({
-      source: "webcli-sdk-page",
       type: "list_providers",
     });
 
@@ -189,7 +262,6 @@ describe("Webcli SDK", () => {
     const createRequest = pageWindow.lastSent();
 
     expect(createRequest).toMatchObject({
-      source: "webcli-sdk-page",
       type: "create_session",
       input: {
         provider: "cursor",
@@ -223,7 +295,6 @@ describe("Webcli SDK", () => {
     const createRequest = pageWindow.lastSent();
 
     expect(createRequest).toMatchObject({
-      source: "webcli-sdk-page",
       type: "create_session",
       input: {
         provider: "claude",
@@ -248,13 +319,12 @@ describe("Webcli SDK", () => {
     ]);
   });
 
-  it("gets settings from the extension bridge", async () => {
+  it("gets settings from the extension", async () => {
     const webcli = new Webcli();
     const promise = webcli.getSettings();
     const request = pageWindow.lastSent();
 
     expect(request).toMatchObject({
-      source: "webcli-sdk-page",
       type: "get_settings",
     });
 
@@ -359,7 +429,6 @@ describe("Webcli SDK", () => {
     const request = pageWindow.lastSent();
 
     expect(request).toMatchObject({
-      source: "webcli-sdk-page",
       type: "resume_session",
       sessionId: "thread_resume",
     });
@@ -475,7 +544,6 @@ describe("Webcli SDK", () => {
     await nextTick();
 
     expect(pageWindow.lastSent()).toMatchObject({
-      source: "webcli-sdk-page",
       type: "submit_tool_result",
       sessionId: "thread_1",
       toolRequestId: "tool_1",
@@ -544,7 +612,7 @@ describe("Webcli SDK", () => {
     expect(ended).toEqual(["ended"]);
   });
 
-  it("rejects pending sends and fires onError on bridge disconnect", async () => {
+  it("rejects pending sends and fires onError on extension disconnect", async () => {
     const webcli = new Webcli();
     const { session } = await createProviderSession(webcli, pageWindow);
     const errors: string[] = [];
@@ -597,7 +665,7 @@ describe("Webcli SDK", () => {
     await send;
   });
 
-  it("times out when the content script bridge does not respond", async () => {
+  it("times out when the extension does not respond", async () => {
     const webcli = new Webcli({ bridgeTimeoutMs: 1 });
     const create = webcli.createSession({ provider: "codex" });
 

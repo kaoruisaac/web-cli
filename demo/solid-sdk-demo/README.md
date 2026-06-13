@@ -32,16 +32,16 @@ npm run dev
 
 Open the Vite URL in Chrome. The WebCLI extension must be loaded and the desktop/native host must be running.
 
-By default the SDK connects to extension id:
+Production builds use this extension id:
 
 ```txt
-oafgamkcidgbmlcocfnmjajpegchbpgh
+ogccgaminlphbkeghldidiiimajfdpag
 ```
 
-To use a different unpacked extension id:
+During `npm run dev`, the demo first reads `WEBCLI_DEV_CHROME_EXTENSION_ID` from the repo-root `.env.local` and falls back to the production id when the value is missing or invalid:
 
-```bash
-VITE_WEBCLI_EXTENSION_ID=your_extension_id npm run dev
+```txt
+WEBCLI_DEV_CHROME_EXTENSION_ID=mifjcaefhmigmhmejhficbnhgnecfibk
 ```
 
 ## Demo Tools
@@ -57,7 +57,7 @@ Unknown tools return a structured `TOOL_HANDLER_NOT_FOUND` result.
 
 ## Common Errors
 
-- `Chrome runtime unavailable`: open the demo in Chrome and ensure extension APIs are available.
-- `Extension unavailable`: load the WebCLI extension and confirm the extension id matches the SDK setting.
+- `Extension unavailable`: load the WebCLI extension and confirm the extension id matches the SDK.
+- `Approval rejected`: approve this origin from the WebCLI extension popup before creating or resuming a session.
 - `Session busy`: wait for the active session to finish before sending another message.
 - `Session ended`: create or resume another session before sending text.

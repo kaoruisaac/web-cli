@@ -1,10 +1,10 @@
-const PAGE_SOURCE = "webcli-sdk-page";
-const EXTENSION_SOURCE = "webcli-sdk-extension";
+import { WEBCLI_EXTENSION_ID } from "./extension-id.js";
+
+const SDK_EXTERNAL_PORT_NAME = "webcli-sdk-external";
 const DEFAULT_BRIDGE_TIMEOUT_MS = 30_000;
 
 export type WebcliOptions = {
   bridgeTimeoutMs?: number;
-  targetOrigin?: string;
 };
 
 export type ProviderCode = "codex" | "gemini" | "opencode" | "cursor" | "claude";
@@ -34,6 +34,12 @@ export type ProviderInfo = {
 export type WebCliSettings = {
   defaultProvider: ProviderCode | null;
   defaultModel: string | null;
+};
+
+export type ApprovalStatus = {
+  installed: boolean;
+  approved: boolean;
+  origin: string | null;
 };
 
 export type WebcliError = {
@@ -104,6 +110,24 @@ type SessionEvent =
 
 type PortMessage = ResponseMessage | SessionEvent;
 
+type RuntimePort = {
+  postMessage: (message: unknown) => void;
+  disconnect?: () => void;
+  onMessage: {
+    addListener: (listener: (message: unknown) => void) => void;
+  };
+  onDisconnect: {
+    addListener: (listener: () => void) => void;
+  };
+};
+
+type ChromeRuntime = {
+  runtime?: {
+    lastError?: { message?: string } | null;
+    connect?: (extensionId: string, connectInfo: { name: string }) => RuntimePort;
+  };
+};
+
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: WebcliError) => void;
@@ -125,22 +149,19 @@ export class Webcli {
   private readonly pageWindow: Window | null;
   private readonly channelId: string;
   private readonly bridgeTimeoutMs: number;
-  private readonly targetOrigin: string;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly sessions = new Map<string, WebcliSession>();
   private readonly lastSeqBySession = new Map<string, number>();
   private nextRequestNumber = 1;
   private disconnectedError: WebcliError | null = null;
-  private readonly messageListener: (event: MessageEvent) => void;
+  private port: RuntimePort | null = null;
 
   constructor(options: WebcliOptions = {}) {
     this.pageWindow = typeof window === "undefined" ? null : window;
     this.channelId = createChannelId();
     this.bridgeTimeoutMs = Math.max(1, options.bridgeTimeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS);
-    this.targetOrigin = options.targetOrigin || "*";
-    this.messageListener = (event) => this.handleWindowMessage(event);
 
-    if (!this.pageWindow?.postMessage || !this.pageWindow?.addEventListener) {
+    if (!this.pageWindow) {
       this.disconnectedError = makeError(
         "EXTENSION_UNAVAILABLE",
         "WebCLI SDK must run in a browser page context."
@@ -148,7 +169,7 @@ export class Webcli {
       return;
     }
 
-    this.pageWindow.addEventListener("message", this.messageListener);
+    this.connectExtension();
   }
 
   async createSession(input: CreateSessionInput = {}): Promise<WebcliSession> {
@@ -187,6 +208,34 @@ export class Webcli {
     return result;
   }
 
+  async getApprovalStatus(): Promise<ApprovalStatus> {
+    if (this.disconnectedError) {
+      return {
+        installed: false,
+        approved: false,
+        origin: getCurrentOrigin(this.pageWindow),
+      };
+    }
+
+    try {
+      const result = await this.request<ApprovalStatus>("get_approval_status");
+      if (!isApprovalStatus(result)) {
+        throw makeError("SDK_PROTOCOL_ERROR", "get_approval_status response had invalid shape");
+      }
+      return result;
+    } catch (err) {
+      const error = normalizeError(err, "EXTENSION_UNAVAILABLE", "WebCLI extension is unavailable.");
+      if (error.code === "EXTENSION_UNAVAILABLE" || error.code === "EXTENSION_DISCONNECTED") {
+        return {
+          installed: false,
+          approved: false,
+          origin: getCurrentOrigin(this.pageWindow),
+        };
+      }
+      throw error;
+    }
+  }
+
   async resumeSession(sessionId: string): Promise<WebcliSession> {
     if (!sessionId?.trim()) {
       throw makeError("INVALID_INPUT", "sessionId is required");
@@ -208,18 +257,18 @@ export class Webcli {
       return Promise.reject(this.disconnectedError);
     }
 
-    if (!this.pageWindow) {
-      return Promise.reject(makeError("EXTENSION_UNAVAILABLE", "WebCLI SDK must run in a browser page context."));
+    if (!this.port) {
+      return Promise.reject(makeError("EXTENSION_UNAVAILABLE", "WebCLI extension is unavailable."));
     }
 
     const requestId = `sdk_${Date.now()}_${this.nextRequestNumber++}`;
-    const message = { source: PAGE_SOURCE, channelId: this.channelId, type, requestId, ...payload };
+    const message = { channelId: this.channelId, type, requestId, ...payload };
 
     return new Promise<T>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         reject(
-          makeError("SDK_BRIDGE_TIMEOUT", "WebCLI extension bridge did not respond.", {
+          makeError("SDK_BRIDGE_TIMEOUT", "WebCLI extension did not respond.", {
             requestId,
             type,
           })
@@ -233,7 +282,7 @@ export class Webcli {
       });
 
       try {
-        this.pageWindow?.postMessage(message, this.targetOrigin);
+        this.port?.postMessage(message);
       } catch (err) {
         this.pendingRequests.delete(requestId);
         clearTimeout(timeoutId);
@@ -354,12 +403,26 @@ export class Webcli {
     return session;
   }
 
-  private handleWindowMessage(event: MessageEvent): void {
-    if (event.source !== this.pageWindow) return;
-    const raw = event.data;
+  private connectExtension(): void {
+    const runtime = (globalThis as { chrome?: ChromeRuntime }).chrome?.runtime;
+    if (!runtime?.connect) {
+      this.disconnectedError = makeError("EXTENSION_UNAVAILABLE", "WebCLI extension is unavailable.");
+      return;
+    }
+
+    try {
+      this.port = runtime.connect(WEBCLI_EXTENSION_ID, { name: SDK_EXTERNAL_PORT_NAME });
+      this.port.onMessage.addListener((message) => this.handlePortMessage(message));
+      this.port.onDisconnect.addListener(() => this.handleDisconnect());
+    } catch (err) {
+      this.disconnectedError = normalizeError(err, "EXTENSION_UNAVAILABLE", "WebCLI extension is unavailable.");
+      this.port = null;
+    }
+  }
+
+  private handlePortMessage(raw: unknown): void {
     const message = raw as PortMessage;
     if (!message || typeof message !== "object") return;
-    if ((message as { source?: unknown }).source !== EXTENSION_SOURCE) return;
     if (message.channelId && message.channelId !== this.channelId) return;
 
     if (message.type === "response") {
@@ -371,7 +434,7 @@ export class Webcli {
       if (message.sessionId) {
         this.sessions.get(message.sessionId)?.handleEvent(message);
       } else if (message.type === "error") {
-        this.broadcastError(normalizeError(message.error, "SDK_BRIDGE_ERROR", "WebCLI bridge error"));
+        this.broadcastError(normalizeError(message.error, "SDK_TRANSPORT_ERROR", "WebCLI transport error"));
       }
     }
   }
@@ -385,7 +448,7 @@ export class Webcli {
     if (message.ok) {
       pending.resolve(message.result);
     } else {
-      pending.reject(normalizeError(message.error, "SDK_BRIDGE_ERROR", "SDK bridge request failed"));
+      pending.reject(normalizeError(message.error, "SDK_TRANSPORT_ERROR", "SDK transport request failed"));
     }
   }
 
@@ -402,8 +465,14 @@ export class Webcli {
   }
 
   private handleDisconnect(): void {
-    const error = makeError("EXTENSION_DISCONNECTED", "WebCLI extension disconnected.");
+    const runtime = (globalThis as { chrome?: ChromeRuntime }).chrome?.runtime;
+    const error = normalizeError(
+      runtime?.lastError,
+      "EXTENSION_DISCONNECTED",
+      "WebCLI extension disconnected."
+    );
     this.disconnectedError = error;
+    this.port = null;
 
     for (const pending of this.pendingRequests.values()) {
       clearTimeout(pending.timeoutId);
@@ -667,6 +736,16 @@ function isSettings(value: unknown): value is WebCliSettings {
   );
 }
 
+function isApprovalStatus(value: unknown): value is ApprovalStatus {
+  if (!value || typeof value !== "object") return false;
+  const status = value as Partial<ApprovalStatus>;
+  return (
+    typeof status.installed === "boolean" &&
+    typeof status.approved === "boolean" &&
+    (status.origin === null || typeof status.origin === "string")
+  );
+}
+
 function isProviderCode(value: string): value is ProviderCode {
   return (
     value === "codex" ||
@@ -687,6 +766,11 @@ function createChannelId(): string {
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2);
   return `webcli_${Date.now()}_${random}`;
+}
+
+function getCurrentOrigin(pageWindow: Window | null): string | null {
+  const origin = pageWindow?.location?.origin;
+  return typeof origin === "string" && origin ? origin : null;
 }
 
 function normalizeError(err: unknown, fallbackCode: string, fallbackMessage: string): WebcliError {

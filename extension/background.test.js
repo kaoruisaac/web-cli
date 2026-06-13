@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createBackground } = require("./background.js");
+const manifest = require("./manifest.json");
 
 class MockPort {
   constructor(name) {
@@ -43,23 +44,63 @@ function createChromeMock() {
   const nativePort = new MockPort("native");
   let connectNativeCallCount = 0;
   let onConnectListener = null;
+  let onConnectExternalListener = null;
+  let openPopupCallCount = 0;
+  let activeTabUrl = "https://active.example.test/page";
+  const storageData = {};
   const chrome = {
     runtime: {
       lastError: null,
       onConnect: { addListener: (listener) => {
         onConnectListener = listener;
       } },
+      onConnectExternal: { addListener: (listener) => {
+        onConnectExternalListener = listener;
+      } },
       connectNative: () => {
         connectNativeCallCount += 1;
         return nativePort;
+      },
+    },
+    storage: {
+      local: {
+        get: (key, callback) => {
+          const result = typeof key === "string" ? { [key]: storageData[key] } : { ...storageData };
+          callback?.(result);
+          return Promise.resolve(result);
+        },
+        set: (value, callback) => {
+          Object.assign(storageData, value);
+          callback?.();
+          return Promise.resolve();
+        },
+      },
+    },
+    action: {
+      openPopup: () => {
+        openPopupCallCount += 1;
+        return Promise.resolve();
+      },
+    },
+    tabs: {
+      query: (_queryInfo, callback) => {
+        const tabs = activeTabUrl ? [{ url: activeTabUrl }] : [];
+        callback?.(tabs);
+        return Promise.resolve(tabs);
       },
     },
   };
   return {
     chrome,
     nativePort,
+    storageData,
     getConnectNativeCallCount: () => connectNativeCallCount,
+    getOpenPopupCallCount: () => openPopupCallCount,
+    setActiveTabUrl: (url) => {
+      activeTabUrl = url;
+    },
     emitRuntimeConnect: (port) => onConnectListener?.(port),
+    emitRuntimeExternalConnect: (port) => onConnectExternalListener?.(port),
   };
 }
 
@@ -77,7 +118,7 @@ function tick() {
 }
 
 async function createSdkSession(background, nativePort, sessionId = "thread_sdk") {
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
   sdkPort.emit({
     type: "create_session",
@@ -101,6 +142,22 @@ async function createSdkSession(background, nativePort, sessionId = "thread_sdk"
   return sdkPort;
 }
 
+function createExternalSdkPort(origin = "https://example.test") {
+  const port = new MockPort("webcli-sdk-external");
+  port.sender = { url: `${origin}/app` };
+  return port;
+}
+
+test("manifest uses external connections without all-url content script injection", () => {
+  assert.equal(manifest.content_scripts, undefined);
+  assert.ok(manifest.permissions.includes("storage"));
+  assert.deepEqual(manifest.externally_connectable.matches, [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+  ]);
+});
+
 test("background start does not connect native host", () => {
   const { chrome, getConnectNativeCallCount } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
@@ -115,12 +172,285 @@ test("background start does not connect native host", () => {
 test("SDK port connect does not connect native host", () => {
   const { chrome, getConnectNativeCallCount } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
 
   background.handleSdkConnect(sdkPort);
 
   assert.equal(getConnectNativeCallCount(), 0);
   assert.equal(sdkPort.sent.length, 0);
+});
+
+test("external SDK port connect does not connect native host", () => {
+  const { chrome, getConnectNativeCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort();
+
+  background.handleSdkExternalConnect(sdkPort);
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(sdkPort.sent.length, 0);
+});
+
+test("unapproved external create_session opens approval without native host", async () => {
+  const { chrome, getConnectNativeCallCount, getOpenPopupCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  const popupPort = new MockPort("popup");
+  background.handlePopupConnect(popupPort);
+  background.handleSdkExternalConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(getOpenPopupCallCount(), 1);
+  assert.deepEqual(background.getPendingApproval(), {
+    origin: "https://app.example.test",
+    requestedAt: background.getPendingApproval().requestedAt,
+    requestCount: 1,
+  });
+  assert.deepEqual(popupPort.sent.findLast((message) => message.type === "approval_state").approvalState, {
+    origin: "https://app.example.test",
+    requestedAt: background.getPendingApproval().requestedAt,
+    requestCount: 1,
+    approved: false,
+    pending: true,
+  });
+});
+
+test("unapproved external resume_session opens approval without native host", async () => {
+  const { chrome, getConnectNativeCallCount, getOpenPopupCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  background.handleSdkExternalConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "resume_session",
+    channelId: "channel_1",
+    requestId: "sdk_resume",
+    sessionId: "thread_existing",
+  });
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(getOpenPopupCallCount(), 1);
+  assert.equal(background.getPendingApproval().origin, "https://app.example.test");
+});
+
+test("approved external create_session continues to native host", async () => {
+  const { chrome, nativePort, storageData } = createChromeMock();
+  storageData.approvedOrigins = [{ origin: "https://app.example.test", approvedAt: 1 }];
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  background.handleSdkExternalConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+  assert.equal(nativePort.lastSent().type, "create_thread");
+  respondNative(nativePort, nativePort.lastSent(), { threadId: "thread_approved" });
+  await tick();
+  respondNative(nativePort, nativePort.lastSent(), { subscribed: true });
+  await tick();
+
+  assert.deepEqual(sdkPort.lastSent(), {
+    channelId: "channel_1",
+    type: "response",
+    requestId: "sdk_create",
+    ok: true,
+    result: { sessionId: "thread_approved" },
+  });
+});
+
+test("popup approve stores origin and resumes pending create_session", async () => {
+  const { chrome, nativePort, storageData } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  const popupPort = new MockPort("popup");
+  background.handleSdkExternalConnect(sdkPort);
+  background.handlePopupConnect(popupPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+  assert.equal(nativePort.sent.length, 0);
+
+  popupPort.emit({ type: "approve_origin", origin: "https://app.example.test" });
+  await tick();
+  assert.equal(storageData.approvedOrigins[0].origin, "https://app.example.test");
+  assert.equal(nativePort.lastSent().type, "create_thread");
+  respondNative(nativePort, nativePort.lastSent(), { threadId: "thread_approved" });
+  await tick();
+  respondNative(nativePort, nativePort.lastSent(), { subscribed: true });
+  await tick();
+
+  assert.deepEqual(sdkPort.lastSent(), {
+    channelId: "channel_1",
+    type: "response",
+    requestId: "sdk_create",
+    ok: true,
+    result: { sessionId: "thread_approved" },
+  });
+});
+
+test("popup reject fails pending create_session", async () => {
+  const { chrome, getConnectNativeCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  const popupPort = new MockPort("popup");
+  background.handleSdkExternalConnect(sdkPort);
+  background.handlePopupConnect(popupPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+  popupPort.emit({ type: "reject_pending_approval" });
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.deepEqual(sdkPort.lastSent(), {
+    channelId: "channel_1",
+    type: "response",
+    requestId: "sdk_create",
+    ok: false,
+    error: { code: "APPROVAL_REJECTED", message: "WebCLI approval was rejected." },
+  });
+});
+
+test("popup close fails pending create_session", async () => {
+  const { chrome, getConnectNativeCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  const popupPort = new MockPort("popup");
+  background.handleSdkExternalConnect(sdkPort);
+  background.handlePopupConnect(popupPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+  popupPort.disconnect();
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(sdkPort.lastSent().ok, false);
+  assert.equal(sdkPort.lastSent().error.code, "APPROVAL_REJECTED");
+});
+
+test("approval timeout fails pending create_session", async () => {
+  const { chrome, getConnectNativeCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true, approvalTimeoutMs: 1 });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  background.handleSdkExternalConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(sdkPort.lastSent().ok, false);
+  assert.equal(sdkPort.lastSent().error.code, "APPROVAL_TIMEOUT");
+});
+
+test("openPopup failure fails pending create_session", async () => {
+  const { chrome, getConnectNativeCallCount } = createChromeMock();
+  chrome.action.openPopup = () => Promise.reject(new Error("blocked"));
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  background.handleSdkExternalConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "create_session",
+    channelId: "channel_1",
+    requestId: "sdk_create",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(sdkPort.lastSent().ok, false);
+  assert.equal(sdkPort.lastSent().error.code, "OPEN_POPUP_FAILED");
+});
+
+test("pending approval for one origin does not approve another origin", async () => {
+  const { chrome, getConnectNativeCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const firstPort = createExternalSdkPort("https://a.example.test");
+  const secondPort = createExternalSdkPort("https://b.example.test");
+  background.handleSdkExternalConnect(firstPort);
+  background.handleSdkExternalConnect(secondPort);
+
+  firstPort.emit({
+    type: "create_session",
+    channelId: "channel_a",
+    requestId: "sdk_create_a",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+  secondPort.emit({
+    type: "create_session",
+    channelId: "channel_b",
+    requestId: "sdk_create_b",
+    input: { provider: "codex", skillsUrls: [] },
+  });
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(secondPort.lastSent().ok, false);
+  assert.equal(secondPort.lastSent().error.code, "CREATE_SESSION_NOT_APPROVED");
+});
+
+test("get_approval_status does not connect native host", async () => {
+  const { chrome, storageData, getConnectNativeCallCount } = createChromeMock();
+  storageData.approvedOrigins = [{ origin: "https://app.example.test", approvedAt: 1 }];
+  const background = createBackground(chrome, { disableReconnect: true });
+  const sdkPort = createExternalSdkPort("https://app.example.test");
+  background.handleSdkExternalConnect(sdkPort);
+
+  sdkPort.emit({
+    type: "get_approval_status",
+    channelId: "channel_1",
+    requestId: "sdk_approval",
+  });
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.deepEqual(sdkPort.lastSent(), {
+    channelId: "channel_1",
+    type: "response",
+    requestId: "sdk_approval",
+    ok: true,
+    result: {
+      installed: true,
+      approved: true,
+      origin: "https://app.example.test",
+    },
+  });
 });
 
 test("popup connect and get_state do not connect native host", async () => {
@@ -133,14 +463,98 @@ test("popup connect and get_state do not connect native host", async () => {
   await tick();
 
   assert.equal(getConnectNativeCallCount(), 0);
-  assert.equal(popupPort.sent.length, 2);
-  assert.equal(popupPort.lastSent().state.connected, false);
+  assert.equal(popupPort.sent.filter((message) => message.type === "state").length, 2);
+  assert.equal(popupPort.sent.findLast((message) => message.type === "state").state.connected, false);
+});
+
+test("popup approval state returns active tab origin when no pending exists", async () => {
+  const { chrome } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const popupPort = new MockPort("popup");
+
+  background.handlePopupConnect(popupPort);
+  popupPort.emit({ type: "get_popup_approval_state" });
+  await tick();
+
+  assert.deepEqual(popupPort.sent.findLast((message) => message.type === "approval_state"), {
+    type: "approval_state",
+    approvalState: {
+      origin: "https://active.example.test",
+      approved: false,
+      pending: false,
+    },
+  });
+});
+
+test("popup approval state returns approved active tab origin", async () => {
+  const { chrome, storageData } = createChromeMock();
+  storageData.approvedOrigins = [{ origin: "https://active.example.test", approvedAt: 1 }];
+  const background = createBackground(chrome, { disableReconnect: true });
+  const popupPort = new MockPort("popup");
+
+  background.handlePopupConnect(popupPort);
+  popupPort.emit({ type: "get_popup_approval_state" });
+  await tick();
+
+  assert.equal(popupPort.sent.findLast((message) => message.type === "approval_state").approvalState.approved, true);
+});
+
+test("popup approval state ignores unsupported active tab URLs", async () => {
+  const { chrome, setActiveTabUrl } = createChromeMock();
+  setActiveTabUrl("chrome://extensions");
+  const background = createBackground(chrome, { disableReconnect: true });
+  const popupPort = new MockPort("popup");
+
+  background.handlePopupConnect(popupPort);
+  popupPort.emit({ type: "get_popup_approval_state" });
+  await tick();
+
+  assert.deepEqual(popupPort.sent.findLast((message) => message.type === "approval_state"), {
+    type: "approval_state",
+    approvalState: {
+      origin: null,
+      approved: false,
+      pending: false,
+    },
+  });
+});
+
+test("approving active tab origin stores approval without native host", async () => {
+  const { chrome, storageData, getConnectNativeCallCount } = createChromeMock();
+  const background = createBackground(chrome, { disableReconnect: true });
+  const popupPort = new MockPort("popup");
+  background.handlePopupConnect(popupPort);
+
+  popupPort.emit({ type: "approve_origin", origin: "https://active.example.test" });
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.equal(storageData.approvedOrigins[0].origin, "https://active.example.test");
+  assert.equal(popupPort.sent.findLast((message) => message.type === "approval_state").approvalState.approved, true);
+});
+
+test("revoking active tab origin removes approval without native host", async () => {
+  const { chrome, storageData, getConnectNativeCallCount } = createChromeMock();
+  storageData.approvedOrigins = [
+    { origin: "https://active.example.test", approvedAt: 1 },
+    { origin: "https://other.example.test", approvedAt: 2 },
+  ];
+  const background = createBackground(chrome, { disableReconnect: true });
+  const popupPort = new MockPort("popup");
+  background.handlePopupConnect(popupPort);
+
+  popupPort.emit({ type: "revoke_origin", origin: "https://active.example.test" });
+  await tick();
+
+  assert.equal(getConnectNativeCallCount(), 0);
+  assert.deepEqual(storageData.approvedOrigins, [{ origin: "https://other.example.test", approvedAt: 2 }]);
+  assert.equal(popupPort.sent.findLast((message) => message.type === "approval_state").approvalState.approved, false);
 });
 
 test("SDK list_providers routes to native host", async () => {
   const { chrome, nativePort, getConnectNativeCallCount } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
   assert.equal(getConnectNativeCallCount(), 0);
 
@@ -173,7 +587,7 @@ test("SDK list_providers routes to native host", async () => {
 test("SDK get_settings routes to native host", async () => {
   const { chrome, nativePort, getConnectNativeCallCount } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
   assert.equal(getConnectNativeCallCount(), 0);
 
@@ -206,7 +620,7 @@ test("SDK get_settings routes to native host", async () => {
 test("SDK create_session forwards opencode provider", async () => {
   const { chrome, nativePort } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
 
   sdkPort.emit({
@@ -223,7 +637,7 @@ test("SDK create_session forwards opencode provider", async () => {
 test("SDK create_session forwards cursor provider", async () => {
   const { chrome, nativePort } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
 
   sdkPort.emit({
@@ -240,7 +654,7 @@ test("SDK create_session forwards cursor provider", async () => {
 test("SDK create_session forwards claude provider", async () => {
   const { chrome, nativePort } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
 
   sdkPort.emit({
@@ -371,7 +785,7 @@ test("create_session after idle disconnect opens a fresh native port before old 
     },
   };
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
 
   sdkPort.emit({
@@ -429,7 +843,7 @@ test("create_session after idle disconnect opens a fresh native port before old 
 test("multiple SDK sessions keep native host until final session ends", async () => {
   const { chrome, nativePort } = createChromeMock();
   const background = createBackground(chrome, { disableReconnect: true });
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
 
   sdkPort.emit({
@@ -513,7 +927,7 @@ test("thread ended event removes SDK route and disconnects when idle", async () 
 test("intentional idle disconnect does not notify SDK error or schedule reconnect", async () => {
   const { chrome, nativePort } = createChromeMock();
   const background = createBackground(chrome);
-  const sdkPort = new MockPort("webcli-sdk-content");
+  const sdkPort = new MockPort("webcli-sdk-internal");
   background.handleSdkConnect(sdkPort);
 
   sdkPort.emit({

@@ -7,7 +7,10 @@ const DEMO_SKILLS_URLS = [
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 const MAX_EVENTS = 80;
-const SDK_PORT_NAME = "webcli-sdk-content";
+const SDK_INTERNAL_PORT_NAME = "webcli-sdk-internal";
+const SDK_EXTERNAL_PORT_NAME = "webcli-sdk-external";
+const APPROVED_ORIGINS_STORAGE_KEY = "approvedOrigins";
+const DEFAULT_APPROVAL_TIMEOUT_MS = 60000;
 
 function createBackground(runtimeChrome, options = {}) {
   let nativePort = null;
@@ -22,7 +25,10 @@ function createBackground(runtimeChrome, options = {}) {
   const activeThreadIds = new Set();
   const sdkPorts = new Set();
   const sdkChannelsByPort = new Map();
+  const sdkContextsByPort = new Map();
   const sdkRoutesBySession = new Map();
+  const approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+  let pendingApproval = null;
 
   let state = {
     connected: false,
@@ -37,7 +43,7 @@ function createBackground(runtimeChrome, options = {}) {
     return `ext_${Date.now()}_${nextRequestNumber++}`;
   }
 
-  function normalizeError(err, fallbackCode = "SDK_BRIDGE_ERROR", fallbackMessage = "WebCLI bridge error") {
+  function normalizeError(err, fallbackCode = "SDK_TRANSPORT_ERROR", fallbackMessage = "WebCLI transport error") {
     if (!err) return { code: fallbackCode, message: fallbackMessage };
     if (typeof err === "string") return { code: fallbackCode, message: err };
     if (err.code && err.message) return err;
@@ -110,6 +116,246 @@ function createBackground(runtimeChrome, options = {}) {
       port.disconnect();
     } catch (_err) {
       pendingIntentionalDisconnects = Math.max(0, pendingIntentionalDisconnects - 1);
+    }
+  }
+
+  function getPendingApprovalState() {
+    if (!pendingApproval) return null;
+    return {
+      origin: pendingApproval.origin,
+      requestedAt: pendingApproval.requestedAt,
+      requestCount: pendingApproval.requests.length,
+    };
+  }
+
+  async function getPopupApprovalState() {
+    let pending = getPendingApprovalState();
+    if (pending?.origin) {
+      return {
+        ...pending,
+        approved: false,
+        pending: true,
+      };
+    }
+
+    const origin = await getActiveTabOrigin();
+    pending = getPendingApprovalState();
+    if (pending?.origin) {
+      return {
+        ...pending,
+        approved: false,
+        pending: true,
+      };
+    }
+
+    if (!origin) {
+      return {
+        origin: null,
+        approved: false,
+        pending: false,
+      };
+    }
+
+    return {
+      origin,
+      approved: await isOriginApproved(origin),
+      pending: false,
+    };
+  }
+
+  async function postPopupApprovalState(port) {
+    try {
+      let approvalState = await getPopupApprovalState();
+      const pending = getPendingApprovalState();
+      if (!approvalState.pending && pending?.origin) {
+        approvalState = {
+          ...pending,
+          approved: false,
+          pending: true,
+        };
+      }
+      port.postMessage({ type: "approval_state", approvalState });
+    } catch (_err) {
+      popupPorts.delete(port);
+    }
+  }
+
+  function broadcastPopupApprovalState() {
+    for (const port of popupPorts) {
+      postPopupApprovalState(port);
+    }
+  }
+
+  function storageGet(key) {
+    const area = runtimeChrome.storage?.local;
+    if (!area?.get) return Promise.resolve({});
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (result) => {
+        if (settled) return;
+        settled = true;
+        const error = runtimeChrome.runtime?.lastError;
+        if (error) reject(normalizeError(error, "STORAGE_ERROR", "Extension storage failed."));
+        else resolve(result || {});
+      };
+
+      try {
+        const maybePromise = area.get(key, done);
+        if (maybePromise?.then) {
+          maybePromise.then(done, reject);
+        }
+      } catch (err) {
+        reject(normalizeError(err, "STORAGE_ERROR", "Extension storage failed."));
+      }
+    });
+  }
+
+  function storageSet(value) {
+    const area = runtimeChrome.storage?.local;
+    if (!area?.set) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        const error = runtimeChrome.runtime?.lastError;
+        if (error) reject(normalizeError(error, "STORAGE_ERROR", "Extension storage failed."));
+        else resolve();
+      };
+
+      try {
+        const maybePromise = area.set(value, done);
+        if (maybePromise?.then) {
+          maybePromise.then(done, reject);
+        }
+      } catch (err) {
+        reject(normalizeError(err, "STORAGE_ERROR", "Extension storage failed."));
+      }
+    });
+  }
+
+  async function readApprovedOrigins() {
+    const result = await storageGet(APPROVED_ORIGINS_STORAGE_KEY);
+    const records = result?.[APPROVED_ORIGINS_STORAGE_KEY];
+    return Array.isArray(records)
+      ? records.filter((record) => record && typeof record.origin === "string")
+      : [];
+  }
+
+  async function isOriginApproved(origin) {
+    if (!origin) return false;
+    const records = await readApprovedOrigins();
+    return records.some((record) => record.origin === origin);
+  }
+
+  async function approveOrigin(origin) {
+    const records = await readApprovedOrigins();
+    const withoutOrigin = records.filter((record) => record.origin !== origin);
+    withoutOrigin.push({ origin, approvedAt: Date.now() });
+    await storageSet({ [APPROVED_ORIGINS_STORAGE_KEY]: withoutOrigin });
+  }
+
+  async function revokeOrigin(origin) {
+    const records = await readApprovedOrigins();
+    await storageSet({
+      [APPROVED_ORIGINS_STORAGE_KEY]: records.filter((record) => record.origin !== origin),
+    });
+  }
+
+  function originFromSender(sender) {
+    const url = sender?.url || sender?.origin;
+    if (typeof url !== "string" || !url.trim()) return null;
+    try {
+      const origin = new URL(url).origin;
+      return origin === "null" ? null : origin;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function originFromUrl(url) {
+    if (typeof url !== "string" || !url.trim()) return null;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+      return parsed.origin;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  async function getActiveTabOrigin() {
+    const tabsApi = runtimeChrome.tabs;
+    if (!tabsApi?.query) return null;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (tabs) => {
+        if (settled) return;
+        settled = true;
+        resolve(originFromUrl(Array.isArray(tabs) ? tabs[0]?.url : null));
+      };
+
+      try {
+        const maybePromise = tabsApi.query({ active: true, currentWindow: true }, done);
+        if (maybePromise?.then) {
+          maybePromise.then(done, () => done([]));
+        }
+      } catch (_err) {
+        done([]);
+      }
+    });
+  }
+
+  async function approvePopupOrigin(origin) {
+    const normalizedOrigin = originFromUrl(origin);
+    if (!normalizedOrigin) {
+      throw {
+        code: "INVALID_ORIGIN",
+        message: "A valid http or https origin is required.",
+      };
+    }
+
+    if (pendingApproval?.origin === normalizedOrigin) {
+      await approvePendingApproval();
+      return;
+    }
+
+    await approveOrigin(normalizedOrigin);
+    broadcastPopupApprovalState();
+  }
+
+  async function revokePopupOrigin(origin) {
+    const normalizedOrigin = originFromUrl(origin);
+    if (!normalizedOrigin) {
+      throw {
+        code: "INVALID_ORIGIN",
+        message: "A valid http or https origin is required.",
+      };
+    }
+
+    await revokeOrigin(normalizedOrigin);
+    broadcastPopupApprovalState();
+  }
+
+  async function openApprovalPopup() {
+    if (!runtimeChrome.action?.openPopup) {
+      throw {
+        code: "OPEN_POPUP_FAILED",
+        message: "Please click the WebCLI extension icon and approve this site.",
+      };
+    }
+
+    try {
+      await runtimeChrome.action.openPopup();
+    } catch (err) {
+      throw normalizeError(
+        err,
+        "OPEN_POPUP_FAILED",
+        "Please click the WebCLI extension icon and approve this site."
+      );
     }
   }
 
@@ -371,7 +617,7 @@ function createBackground(runtimeChrome, options = {}) {
   function postSdkResponse(port, channelId, requestId, ok, result, error) {
     const message = { channelId, type: "response", requestId, ok };
     if (ok) message.result = result ?? {};
-    if (!ok) message.error = normalizeError(error, "SDK_BRIDGE_ERROR", "SDK bridge request failed");
+    if (!ok) message.error = normalizeError(error, "SDK_TRANSPORT_ERROR", "SDK transport request failed");
     try {
       port.postMessage(message);
     } catch (_err) {
@@ -385,6 +631,98 @@ function createBackground(runtimeChrome, options = {}) {
     } catch (_err) {
       disconnectSdkPort(port);
     }
+  }
+
+  function rejectPendingApproval(error) {
+    if (!pendingApproval) return;
+    const current = pendingApproval;
+    pendingApproval = null;
+    clearTimeout(current.timeoutId);
+    for (const request of current.requests) {
+      postSdkResponse(request.port, request.channelId, request.requestId, false, null, error);
+    }
+    broadcastPopupApprovalState();
+  }
+
+  async function approvePendingApproval() {
+    if (!pendingApproval) return;
+    const current = pendingApproval;
+    pendingApproval = null;
+    clearTimeout(current.timeoutId);
+
+    try {
+      await approveOrigin(current.origin);
+      broadcastPopupApprovalState();
+      for (const request of current.requests) {
+        handleSdkMessage(request.port, request.message, { skipApproval: true });
+      }
+    } catch (err) {
+      const error = normalizeError(err, "STORAGE_ERROR", "Could not approve this site.");
+      for (const request of current.requests) {
+        postSdkResponse(request.port, request.channelId, request.requestId, false, null, error);
+      }
+      broadcastPopupApprovalState();
+    }
+  }
+
+  async function ensureApprovedOrQueue(port, message, context) {
+    const requestId = message?.requestId || "";
+    const channelId = message?.channelId || "";
+    const origin = context?.origin;
+
+    if (!origin) {
+      postSdkResponse(port, channelId, requestId, false, null, {
+        code: "CREATE_SESSION_NOT_APPROVED",
+        message: "WebCLI could not verify this site's origin.",
+      });
+      return false;
+    }
+
+    if (await isOriginApproved(origin)) return true;
+
+    if (pendingApproval && pendingApproval.origin !== origin) {
+      postSdkResponse(port, channelId, requestId, false, null, {
+        code: "CREATE_SESSION_NOT_APPROVED",
+        message: "Another site is already waiting for WebCLI approval.",
+      });
+      return false;
+    }
+
+    const pendingRequest = {
+      port,
+      message,
+      requestId,
+      channelId,
+    };
+
+    if (pendingApproval) {
+      pendingApproval.requests.push(pendingRequest);
+      broadcastPopupApprovalState();
+      return false;
+    }
+
+    const timeoutId = setTimeout(() => {
+      rejectPendingApproval({
+        code: "APPROVAL_TIMEOUT",
+        message: "WebCLI approval timed out.",
+      });
+    }, approvalTimeoutMs);
+    timeoutId.unref?.();
+
+    pendingApproval = {
+      origin,
+      requestedAt: Date.now(),
+      requests: [pendingRequest],
+      timeoutId,
+    };
+    broadcastPopupApprovalState();
+
+    try {
+      await openApprovalPopup();
+    } catch (err) {
+      rejectPendingApproval(err);
+    }
+    return false;
   }
 
   function notifyAllSdkPorts(message) {
@@ -457,6 +795,7 @@ function createBackground(runtimeChrome, options = {}) {
 
   function disconnectSdkPort(port) {
     sdkPorts.delete(port);
+    sdkContextsByPort.delete(port);
     const channels = sdkChannelsByPort.get(port);
     if (channels) {
       for (const [channelId, sessions] of Array.from(channels.entries())) {
@@ -466,6 +805,15 @@ function createBackground(runtimeChrome, options = {}) {
       }
     }
     sdkChannelsByPort.delete(port);
+
+    if (pendingApproval) {
+      pendingApproval.requests = pendingApproval.requests.filter((request) => request.port !== port);
+      if (pendingApproval.requests.length === 0) {
+        clearTimeout(pendingApproval.timeoutId);
+        pendingApproval = null;
+      }
+      broadcastPopupApprovalState();
+    }
   }
 
   function sdkEventFromThreadEvent(event) {
@@ -516,9 +864,10 @@ function createBackground(runtimeChrome, options = {}) {
     }
   }
 
-  async function handleSdkMessage(port, message) {
+  async function handleSdkMessage(port, message, options = {}) {
     const requestId = message?.requestId || "";
     const channelId = message?.channelId || "";
+    const context = sdkContextsByPort.get(port) || {};
     try {
       if (!requestId) {
         throw { code: "SDK_PROTOCOL_ERROR", message: "requestId is required" };
@@ -527,7 +876,22 @@ function createBackground(runtimeChrome, options = {}) {
         throw { code: "SDK_PROTOCOL_ERROR", message: "channelId is required" };
       }
 
+      if (message.type === "get_approval_status") {
+        const origin = context.origin || null;
+        const approved = origin ? await isOriginApproved(origin) : false;
+        postSdkResponse(port, channelId, requestId, true, {
+          installed: true,
+          approved,
+          origin,
+        });
+        return;
+      }
+
       if (message.type === "create_session") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
         await withNativeOperation(async () => {
           const input = message.input || {};
           const result = await sendNativeRequest("create_thread", {
@@ -567,6 +931,10 @@ function createBackground(runtimeChrome, options = {}) {
       }
 
       if (message.type === "resume_session") {
+        if (context.approvalRequired && !options.skipApproval) {
+          const approved = await ensureApprovedOrQueue(port, message, context);
+          if (!approved) return;
+        }
         const sessionId = message.sessionId;
         if (!sessionId) {
           throw { code: "SDK_PROTOCOL_ERROR", message: "sessionId is required" };
@@ -624,6 +992,7 @@ function createBackground(runtimeChrome, options = {}) {
 
     popupPorts.add(port);
     port.postMessage({ type: "state", state });
+    postPopupApprovalState(port);
 
     port.onMessage.addListener(async (message) => {
       try {
@@ -635,6 +1004,19 @@ function createBackground(runtimeChrome, options = {}) {
           await endThread();
         } else if (message?.type === "get_state") {
           port.postMessage({ type: "state", state });
+        } else if (message?.type === "get_popup_approval_state") {
+          await postPopupApprovalState(port);
+        } else if (message?.type === "approve_origin") {
+          await approvePopupOrigin(message.origin);
+          await postPopupApprovalState(port);
+        } else if (message?.type === "revoke_origin") {
+          await revokePopupOrigin(message.origin);
+          await postPopupApprovalState(port);
+        } else if (message?.type === "reject_pending_approval") {
+          rejectPendingApproval({
+            code: "APPROVAL_REJECTED",
+            message: "WebCLI approval was rejected.",
+          });
         }
       } catch (err) {
         setState({ error: formatError(err) });
@@ -643,14 +1025,44 @@ function createBackground(runtimeChrome, options = {}) {
 
     port.onDisconnect.addListener(() => {
       popupPorts.delete(port);
+      if (pendingApproval) {
+        rejectPendingApproval({
+          code: "APPROVAL_REJECTED",
+          message: "WebCLI approval was not completed.",
+        });
+      }
     });
   }
 
-  function handleSdkConnect(port) {
-    if (port.name !== SDK_PORT_NAME) return;
+  function handleSdkConnect(port, context = {}) {
+    if (port.name !== SDK_INTERNAL_PORT_NAME) return;
 
     sdkPorts.add(port);
     sdkChannelsByPort.set(port, new Map());
+    sdkContextsByPort.set(port, {
+      origin: context.origin || null,
+      approvalRequired: Boolean(context.approvalRequired),
+    });
+
+    port.onMessage.addListener((message) => {
+      handleSdkMessage(port, message);
+    });
+
+    port.onDisconnect.addListener(() => {
+      disconnectSdkPort(port);
+    });
+  }
+
+  function handleSdkExternalConnect(port) {
+    if (port.name !== SDK_EXTERNAL_PORT_NAME) return;
+
+    const origin = originFromSender(port.sender);
+    sdkPorts.add(port);
+    sdkChannelsByPort.set(port, new Map());
+    sdkContextsByPort.set(port, {
+      origin,
+      approvalRequired: true,
+    });
 
     port.onMessage.addListener((message) => {
       handleSdkMessage(port, message);
@@ -666,6 +1078,9 @@ function createBackground(runtimeChrome, options = {}) {
       handlePopupConnect(port);
       handleSdkConnect(port);
     });
+    runtimeChrome.runtime.onConnectExternal?.addListener((port) => {
+      handleSdkExternalConnect(port);
+    });
   }
 
   return {
@@ -674,9 +1089,11 @@ function createBackground(runtimeChrome, options = {}) {
     handleNativeDisconnect,
     handlePopupConnect,
     handleSdkConnect,
+    handleSdkExternalConnect,
     handleSdkMessage,
     dispatchSdkThreadEvent,
     sdkEventFromThreadEvent,
+    getPendingApproval: getPendingApprovalState,
     getState: () => state,
     getSdkRouteCount: () => sdkRoutesBySession.size,
     getNativeRequestCount: () => pendingRequests.size,

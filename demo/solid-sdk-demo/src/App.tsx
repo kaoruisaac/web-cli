@@ -71,7 +71,7 @@ type AskUserState = {
 
 type ConnectionState = {
   sdk: ConnectionValue;
-  bridge: ConnectionValue;
+  runtime: ConnectionValue;
   extension: ConnectionValue;
   message: string;
 };
@@ -163,7 +163,7 @@ export default function App() {
         skillsUrls: skillsUrls(),
       });
       registerSession(session, provider(), model().trim() || undefined);
-      setConnection((current) => ({ ...current, extension: "connected", message: "Extension bridge connected." }));
+      setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err));
       markExtensionError(err);
@@ -181,7 +181,7 @@ export default function App() {
       const session = await sdk.resumeSession(sessionId);
       registerSession(session, "resumed", undefined);
       setResumeId("");
-      setConnection((current) => ({ ...current, extension: "connected", message: "Extension bridge connected." }));
+      setConnection((current) => ({ ...current, extension: "connected", message: "Extension connected." }));
     } catch (err) {
       recordError(toDemoError(err, sessionId));
       markExtensionError(err);
@@ -694,26 +694,25 @@ export default function App() {
 }
 
 function initializeClient(setClient: (client: Webcli | null) => void): ConnectionState {
-  const pageMessagingAvailable =
+  const runtimeAvailable =
     typeof window !== "undefined" &&
-    typeof window.postMessage === "function" &&
-    typeof window.addEventListener === "function";
+    typeof (globalThis as { chrome?: { runtime?: { connect?: unknown } } }).chrome?.runtime?.connect === "function";
   try {
     const sdk = new Webcli();
     setClient(sdk);
     return {
       sdk: "initialized",
-      bridge: pageMessagingAvailable ? "available" : "unavailable",
-      extension: pageMessagingAvailable ? "unknown" : "unavailable",
-      message: pageMessagingAvailable
-        ? "SDK initialized. The extension content-script bridge is verified on first request."
-        : "WebCLI SDK must run in a browser page with window messaging available.",
+      runtime: runtimeAvailable ? "available" : "unavailable",
+      extension: runtimeAvailable ? "unknown" : "unavailable",
+      message: runtimeAvailable
+        ? "SDK initialized. The extension connection is verified on first request."
+        : "WebCLI SDK must run in a Chrome page where extension runtime messaging is available.",
     };
   } catch (err) {
     setClient(null);
     return {
       sdk: "failed",
-      bridge: pageMessagingAvailable ? "available" : "unavailable",
+      runtime: runtimeAvailable ? "available" : "unavailable",
       extension: "unavailable",
       message: toWebcliError(err, "SDK_INIT_FAILED", "SDK initialization failed").message,
     };
@@ -724,7 +723,7 @@ function StatusGrid(props: { connection: ConnectionState }) {
   return (
     <div class="status-grid">
       <Info label="SDK" value={props.connection.sdk} />
-      <Info label="Page bridge" value={props.connection.bridge} />
+      <Info label="Runtime" value={props.connection.runtime} />
       <Info label="Extension" value={props.connection.extension} />
       <p class="diagnostic">{props.connection.message}</p>
     </div>
