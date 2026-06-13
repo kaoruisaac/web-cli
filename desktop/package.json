@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "pretauri": "cd tauri && cargo build --bin webcli-tool && cargo build --bin webcli-native-host",
+    "pretauri": "node scripts/stage-tauri-binaries.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

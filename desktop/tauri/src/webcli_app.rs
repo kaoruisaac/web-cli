@@ -6,13 +6,16 @@ use crate::webcli_core::{
 use crate::webcli_ipc::{start_core_ipc_server, start_provider_process};
 use crate::webcli_native_registration::register_chrome_native_messaging_host;
 use crate::webcli_paths::{
-    ensure_user_path_contains_webcli_dir, ensure_webcli_tool_installed_from_current_exe,
-    prepend_webcli_dir_to_process_path,
+    ensure_user_path_contains_webcli_dir, install_webcli_native_host_from_path,
+    install_webcli_tool_from_path, prepend_webcli_dir_to_process_path,
+    webcli_native_host_binary_name, webcli_tool_binary_name,
 };
+use std::path::PathBuf;
 use std::thread;
 use tauri::menu::{Menu, MenuItem};
+use tauri::path::BaseDirectory;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, RunEvent, State};
+use tauri::{App, Emitter, Manager, RunEvent, State};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -34,10 +37,19 @@ pub fn run() {
             end_thread
         ])
         .setup(move |app| {
-            let webcli_tool_path =
-                ensure_webcli_tool_installed_from_current_exe().map_err(|err| {
+            let webcli_tool_source = bundled_binary_path(app, webcli_tool_binary_name())?;
+            let native_host_source = bundled_binary_path(app, webcli_native_host_binary_name())?;
+            let _webcli_tool_path =
+                install_webcli_tool_from_path(&webcli_tool_source).map_err(|err| {
                     tauri::Error::from(std::io::Error::other(format!(
                         "cannot install webcli-tool: {}",
+                        err.message
+                    )))
+                })?;
+            let _native_host_path = install_webcli_native_host_from_path(&native_host_source)
+                .map_err(|err| {
+                    tauri::Error::from(std::io::Error::other(format!(
+                        "cannot install webcli-native-host: {}",
                         err.message
                     )))
                 })?;
@@ -53,7 +65,7 @@ pub fn run() {
                     err.message
                 )))
             })?;
-            let ipc_handle = start_core_ipc_server(runtime_for_setup.clone()).map_err(|err| {
+            let _ipc_handle = start_core_ipc_server(runtime_for_setup.clone()).map_err(|err| {
                 tauri::Error::from(std::io::Error::other(format!(
                     "cannot start Core IPC server: {}",
                     err.message
@@ -63,29 +75,34 @@ pub fn run() {
             #[cfg(debug_assertions)]
             eprintln!(
                 "Core IPC listening at {} (runtime: {})",
-                ipc_handle.runtime_file.endpoint,
-                ipc_handle.runtime_file_path.to_string_lossy()
+                _ipc_handle.runtime_file.endpoint,
+                _ipc_handle.runtime_file_path.to_string_lossy()
             );
             #[cfg(debug_assertions)]
             eprintln!(
                 "webcli-tool installed at {}",
-                webcli_tool_path.to_string_lossy()
+                _webcli_tool_path.to_string_lossy()
+            );
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "webcli-native-host installed at {}",
+                _native_host_path.to_string_lossy()
             );
             match register_chrome_native_messaging_host() {
-                Ok(registration) => {
+                Ok(_registration) => {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "Chrome native messaging host {} registered (manifest: {}, binary: {})",
-                        registration.host_name,
-                        registration.manifest_path.to_string_lossy(),
-                        registration.native_host_path.to_string_lossy()
+                        _registration.host_name,
+                        _registration.manifest_path.to_string_lossy(),
+                        _registration.native_host_path.to_string_lossy()
                     );
                 }
-                Err(err) => {
+                Err(_err) => {
                     #[cfg(debug_assertions)]
                     eprintln!(
                         "Chrome native messaging auto-registration skipped: {}",
-                        err.message
+                        _err.message
                     );
                 }
             }
@@ -134,14 +151,19 @@ pub fn run() {
                 if code.is_none() {
                     api.prevent_exit();
                 } else {
-                    let errors = runtime_for_exit.lock().unwrap().cleanup_for_app_exit();
+                    let _errors = runtime_for_exit.lock().unwrap().cleanup_for_app_exit();
                     #[cfg(debug_assertions)]
-                    for err in errors {
+                    for err in _errors {
                         eprintln!("sandbox cleanup failed during app exit: {}", err.message);
                     }
                 }
             }
         });
+}
+
+fn bundled_binary_path(app: &App, binary_name: &str) -> Result<PathBuf, tauri::Error> {
+    app.path()
+        .resolve(format!("binaries/{binary_name}"), BaseDirectory::Resource)
 }
 
 fn show_main_window(app: &tauri::AppHandle) {

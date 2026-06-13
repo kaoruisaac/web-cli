@@ -60,7 +60,7 @@ npm run build
 在 Web App 端引用：
 
 ```ts
-import { Webcli } from "webcli";
+import { Webcli } from "@kaoruisaac/webcli";
 ```
 
 如果尚未發布到 npm，可以先用本地 path 安裝：
@@ -74,7 +74,7 @@ npm install ../path/to/web-cli/sdk
 ## 最小使用範例
 
 ```ts
-import { Webcli } from "webcli";
+import { Webcli } from "@kaoruisaac/webcli";
 
 const webcli = new Webcli();
 

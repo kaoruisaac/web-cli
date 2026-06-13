@@ -27,21 +27,55 @@ pub fn webcli_tool_install_path() -> Result<PathBuf, WebCliError> {
     Ok(webcli_home_dir()?.join(webcli_tool_binary_name()))
 }
 
-pub fn ensure_webcli_tool_installed_from_current_exe() -> Result<PathBuf, WebCliError> {
-    let current_exe = env::current_exe().map_err(|err| {
-        WebCliError::with_details(
-            error_codes::IPC_UNAVAILABLE,
-            "cannot locate current executable",
-            serde_json::json!({ "error": err.to_string() }),
-        )
-    })?;
-    let source = current_exe.with_file_name(webcli_tool_binary_name());
-    install_webcli_tool_from_paths(&source, webcli_tool_install_path()?)
+pub fn webcli_native_host_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "webcli-native-host.exe"
+    } else {
+        "webcli-native-host"
+    }
+}
+
+pub fn webcli_native_host_install_path() -> Result<PathBuf, WebCliError> {
+    Ok(webcli_home_dir()?.join(webcli_native_host_binary_name()))
+}
+
+pub fn install_webcli_tool_from_path(source: impl AsRef<Path>) -> Result<PathBuf, WebCliError> {
+    install_binary_from_paths(
+        source,
+        webcli_tool_install_path()?,
+        "webcli-tool",
+        "cannot install webcli-tool binary",
+    )
 }
 
 pub fn install_webcli_tool_from_paths(
     source: impl AsRef<Path>,
     target: impl AsRef<Path>,
+) -> Result<PathBuf, WebCliError> {
+    install_binary_from_paths(
+        source,
+        target,
+        "webcli-tool",
+        "cannot install webcli-tool binary",
+    )
+}
+
+pub fn install_webcli_native_host_from_path(
+    source: impl AsRef<Path>,
+) -> Result<PathBuf, WebCliError> {
+    install_binary_from_paths(
+        source,
+        webcli_native_host_install_path()?,
+        "webcli-native-host",
+        "cannot install webcli-native-host binary",
+    )
+}
+
+fn install_binary_from_paths(
+    source: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+    binary_label: &str,
+    install_error_message: &str,
 ) -> Result<PathBuf, WebCliError> {
     let source = source.as_ref();
     let target = target.as_ref();
@@ -49,7 +83,7 @@ pub fn install_webcli_tool_from_paths(
     if !source.exists() {
         return Err(WebCliError::with_details(
             error_codes::IPC_UNAVAILABLE,
-            "webcli-tool binary was not found next to webcli-app",
+            format!("{binary_label} binary was not found in Tauri resources"),
             serde_json::json!({ "path": source.to_string_lossy() }),
         ));
     }
@@ -74,7 +108,7 @@ pub fn install_webcli_tool_from_paths(
     fs::copy(source, target).map_err(|err| {
         WebCliError::with_details(
             error_codes::IPC_UNAVAILABLE,
-            "cannot install webcli-tool binary",
+            install_error_message,
             serde_json::json!({
                 "source": source.to_string_lossy(),
                 "target": target.to_string_lossy(),
@@ -90,7 +124,7 @@ pub fn install_webcli_tool_from_paths(
             .map_err(|err| {
                 WebCliError::with_details(
                     error_codes::IPC_UNAVAILABLE,
-                    "cannot read installed webcli-tool metadata",
+                    format!("cannot read installed {binary_label} metadata"),
                     serde_json::json!({
                         "path": target.to_string_lossy(),
                         "error": err.to_string()
@@ -102,7 +136,7 @@ pub fn install_webcli_tool_from_paths(
         fs::set_permissions(target, permissions).map_err(|err| {
             WebCliError::with_details(
                 error_codes::IPC_UNAVAILABLE,
-                "cannot mark installed webcli-tool executable",
+                format!("cannot mark installed {binary_label} executable"),
                 serde_json::json!({
                     "path": target.to_string_lossy(),
                     "error": err.to_string()

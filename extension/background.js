@@ -1,4 +1,4 @@
-const HOST_NAME = "com.example.webcli";
+const HOST_NAME = "cc.isaaclin.webcli";
 const DEMO_PROVIDER = "codex";
 const DEMO_SKILLS_URLS = [
   "http://127.0.0.1:8765/tools.json",

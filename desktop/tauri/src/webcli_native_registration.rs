@@ -1,13 +1,12 @@
 use crate::webcli_core::{error_codes, WebCliError};
-use crate::webcli_paths::webcli_home_dir;
+use crate::webcli_paths::{webcli_home_dir, webcli_native_host_install_path};
 use serde::Serialize;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const CHROME_NATIVE_HOST_NAME: &str = "com.example.webcli";
-const CHROME_EXTENSION_ID: &str = "mifjcaefhmigmhmejhficbnhgnecfibk";
-const MANIFEST_FILE_NAME: &str = "com.example.webcli.json";
+pub const CHROME_NATIVE_HOST_NAME: &str = "cc.isaaclin.webcli";
+const CHROME_EXTENSION_ID: &str = "ogccgaminlphbkeghldidiiimajfdpag";
+const MANIFEST_FILE_NAME: &str = "cc.isaaclin.webcli.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeMessagingRegistration {
@@ -27,7 +26,7 @@ struct NativeHostManifest {
 }
 
 pub fn register_chrome_native_messaging_host() -> Result<NativeMessagingRegistration, WebCliError> {
-    let native_host_path = current_native_host_path()?;
+    let native_host_path = webcli_native_host_install_path()?;
     let manifest_path = chrome_native_host_manifest_path()?;
 
     register_chrome_native_messaging_host_with_paths(
@@ -35,25 +34,6 @@ pub fn register_chrome_native_messaging_host() -> Result<NativeMessagingRegistra
         &native_host_path,
         &manifest_path,
     )
-}
-
-fn current_native_host_path() -> Result<PathBuf, WebCliError> {
-    let current_exe = env::current_exe().map_err(|err| {
-        WebCliError::with_details(
-            error_codes::IPC_UNAVAILABLE,
-            "cannot locate current executable for native messaging registration",
-            serde_json::json!({ "error": err.to_string() }),
-        )
-    })?;
-    Ok(current_exe.with_file_name(native_host_binary_name()))
-}
-
-fn native_host_binary_name() -> &'static str {
-    if cfg!(windows) {
-        "webcli-native-host.exe"
-    } else {
-        "webcli-native-host"
-    }
 }
 
 fn validate_chrome_extension_id(extension_id: &str) -> Result<(), WebCliError> {
@@ -77,7 +57,7 @@ fn register_chrome_native_messaging_host_with_paths(
     if !native_host_path.exists() {
         return Err(WebCliError::with_details(
             error_codes::IPC_UNAVAILABLE,
-            "webcli-native-host binary was not found next to webcli-app",
+            "installed webcli-native-host binary was not found",
             serde_json::json!({ "path": native_host_path.to_string_lossy() }),
         ));
     }
@@ -284,7 +264,9 @@ mod tests {
     #[test]
     fn missing_native_host_binary_returns_error() {
         let temp = tempfile::tempdir().unwrap();
-        let missing_host = temp.path().join(native_host_binary_name());
+        let missing_host = temp
+            .path()
+            .join(crate::webcli_paths::webcli_native_host_binary_name());
         let manifest_path = temp.path().join(MANIFEST_FILE_NAME);
 
         let err = register_chrome_native_messaging_host_with_paths(
@@ -301,7 +283,9 @@ mod tests {
     #[test]
     fn writes_native_host_manifest_when_binary_exists() {
         let temp = tempfile::tempdir().unwrap();
-        let native_host = temp.path().join(native_host_binary_name());
+        let native_host = temp
+            .path()
+            .join(crate::webcli_paths::webcli_native_host_binary_name());
         let manifest_path = temp.path().join(MANIFEST_FILE_NAME);
         fs::write(&native_host, b"fake-native-host").unwrap();
 
