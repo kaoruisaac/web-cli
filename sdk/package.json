@@ -18,6 +18,11 @@
       "import": "./dist/index.js"
     }
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kaoruisaac/web-cli.git",
+    "directory": "sdk"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
