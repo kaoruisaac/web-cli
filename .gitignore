@@ -11,6 +11,7 @@ dist-ssr/
 
 # Rust / Tauri
 **/target/
+**/binaries/
 
 # Tauri auto-generated schemas (regenerated on dev/build)
 **/gen/schemas/

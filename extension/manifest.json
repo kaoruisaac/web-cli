@@ -9,6 +9,7 @@
     "service_worker": "background.js"
   },
   "permissions": [
+    "activeTab",
     "nativeMessaging"
   ],
   "content_scripts": [

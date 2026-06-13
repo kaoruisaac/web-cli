@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub const CHROME_NATIVE_HOST_NAME: &str = "cc.isaaclin.webcli";
 const CHROME_EXTENSION_ID: &str = "ogccgaminlphbkeghldidiiimajfdpag";
+const DEV_CHROME_EXTENSION_ID_ENV: &str = "WEBCLI_DEV_CHROME_EXTENSION_ID";
 const MANIFEST_FILE_NAME: &str = "cc.isaaclin.webcli.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,10 +31,25 @@ pub fn register_chrome_native_messaging_host() -> Result<NativeMessagingRegistra
     let manifest_path = chrome_native_host_manifest_path()?;
 
     register_chrome_native_messaging_host_with_paths(
-        CHROME_EXTENSION_ID,
+        chrome_extension_id(),
         &native_host_path,
         &manifest_path,
     )
+}
+
+#[cfg(debug_assertions)]
+fn chrome_extension_id() -> &'static str {
+    let _ = DEV_CHROME_EXTENSION_ID_ENV;
+    option_env!("WEBCLI_DEV_CHROME_EXTENSION_ID")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(CHROME_EXTENSION_ID)
+}
+
+#[cfg(not(debug_assertions))]
+fn chrome_extension_id() -> &'static str {
+    let _ = DEV_CHROME_EXTENSION_ID_ENV;
+    CHROME_EXTENSION_ID
 }
 
 fn validate_chrome_extension_id(extension_id: &str) -> Result<(), WebCliError> {
@@ -240,6 +256,20 @@ mod tests {
                     format!("chrome-extension://{CHROME_EXTENSION_ID}/")
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn manifest_can_use_custom_extension_id() {
+        let native_host_path = PathBuf::from(r"C:\webcli\webcli-native-host.exe");
+        let extension_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let manifest = build_native_host_manifest(extension_id, &native_host_path);
+        let value = serde_json::to_value(manifest).unwrap();
+
+        assert_eq!(
+            value["allowed_origins"],
+            json!([format!("chrome-extension://{extension_id}/")])
         );
     }
 
