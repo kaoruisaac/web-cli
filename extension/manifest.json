@@ -1,18 +1,24 @@
 {
   "manifest_version": 3,
   "name": "WebCli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "action": {
     "default_popup": "popup.html"
   },
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["nativeMessaging"],
+  "permissions": [
+    "nativeMessaging"
+  ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["webcli-sdk-content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "webcli-sdk-content.js"
+      ],
       "run_at": "document_start"
     }
   ],

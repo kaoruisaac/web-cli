@@ -1,6 +1,6 @@
 [package]
 name = "webcli-app"
-version = "0.1.0"
+version = "0.1.1"
 description = "WebCli"
 authors = ["Isaac Lin"]
 edition = "2021"
